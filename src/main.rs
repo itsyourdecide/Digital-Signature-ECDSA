@@ -1,12 +1,31 @@
 use sha256_core::secp256k1::Point;
 use sha256_core::signature::Signature;
-use std::fs::File;
-use std::io::Read;
 
+#[cfg(target_family = "unix")]
 fn get_os_entropy() -> [u8; 32] {
+    use std::fs::File;
+    use std::io::Read;
+
     let mut buf = [0u8; 32];
-    let mut file = File::open("/dev/urandom").expect("OS entropy failed");
-    file.read_exact(&mut buf).expect("Failed to read");
+    let mut file = File::open("/dev/urandom").expect("OS entropy failed: /dev/urandom not found");
+    file.read_exact(&mut buf).expect("Failed to read from /dev/urandom");
+    buf
+}
+
+#[cfg(target_os = "windows")]
+fn get_os_entropy() -> [u8; 32] {
+    
+    #[link(name = "advapi32")]
+    extern "system" {
+        #[link_name = "SystemFunction036"]
+        fn RtlGenRandom(RandomBuffer: *mut u8, RandomBufferLength: u32) -> u8;
+    }
+
+    let mut buf = [0u8; 32];
+    unsafe {
+        let res = RtlGenRandom(buf.as_mut_ptr(), buf.len() as u32);
+        assert!(res != 0, "Windows OS entropy (RtlGenRandom) failed");
+    }
     buf
 }
 
