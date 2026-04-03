@@ -1,68 +1,193 @@
-# SHA-256 from scratch in Rust
+# SHA256 + secp256k1 + ECDSA подписи (Rust реализация)
 
-Hey! This is my implementation of SHA-256, written completely from scratch in Rust.
+## Что здесь происходит?
 
-I didn't use any libraries or copy anyone's code — I just read the math behind the algorithm ([FIPS 180-4](https://csrc.nist.gov/publications/detail/fips/180/4/final)) and tried to turn it into working code. This is one of my first projects on GitHub so please bear with me :)
+Это полная реализация криптографии Bitcoin на Rust — SHA-256 хеширование, эллиптическая кривая secp256k1, и ECDSA подписи с правильной канонической нормализацией (low-S).
+Ето продолжение моих прошлих репозиториев secp256k1 и SHA256 но с большими правками
 
-## What is this
+---
 
-SHA-256 is a cryptographic hash function. You give it any data, and it returns a unique 256-bit (32 byte) fingerprint. It's used everywhere in crypto/web3, Bitcoin mining, digital signatures, etc.
+## История всех изменений
 
-I wanted to actually understand how it works instead of just calling a library, so I built it myself.
+### 🔴 **Начало: Весь ужас был в сломанной криптографии**
 
-## What I implemented
 
-- Padding (extending input to 512-bit blocks)
-- Message schedule (expanding 16 words into 64)
-- Compression function (64 rounds with bitwise magic)
-- Davies-Meyer feedforward
-- All the bit rotation and XOR stuff that makes SHA-256 work
+#### **1. Неправильная константа порядка группы N**
+В `secp256k1.rs` константа `N` имела неправильное значение — третий limb был `0xFFFFFFFFFFFFFFFF` вместо `0xFFFFFFFFFFFFFFFE`.
+Это звучит как мелкая опечатка, но это означало, что все расчёты модульной арифметики модulo N были на 2^128 больше, чем нужно! 
+**Результат:** подписи никогда не верифицировались, потому что модульная инверсия работала неправильно.
 
-No dependencies, just standard Rust.
+#### **2. Проблема модулей**
+Когда я писал стуктуру U256 в secp256k1 я думал что ключи создаются тоже на поле с модулем P, но к моему разочарованию
+ето не так, оказалось что для подписей и генерации ключей используют модуль N, и пришлось добавлять в каждую функцию универсальность
+для разних модулей
+Нужно было **привести всё к единому стилю**: функции работают с произвольным модулем (P для точек, N для подписей).
 
-## How to run
+---
 
-```bash
-cargo run
-```
+### 🟡 **Этап 1: Рефакторинг и унификация secp256k1.rs**
 
-It will ask you to type something, then print the hash:
+#### **Что я исправил:**
 
-```
-Enter text to hash:
-hello
-hash: 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
-```
+2. **Добавил метод `is_zero()`** — позволяет проверить, равно ли число нулю (часто нужно при подписании).
 
-## Does it actually work?
+3. **Добавил метод `from_bytes()`** — конвертирует массив 32 байт в U256. Нужен для хеширования сообщений.
 
-Yes! I tested it against official NIST test vectors:
+4. **Унифицировал все модульные операции:**
+   - `add_mod(a, b, modulus)` — теперь принимает модуль и правильно редуцирует результат
+   - `mul_mod(a, b, modulus)` — для P используется быстрое приведение через `reduce()`, для других модулей работает "русское крестьянское умножение" (binary multiplication)
+   - `pow_mod(base, exp, modulus)` — бинарное возведение в степень с произвольным модулем
+   - `invert(a, modulus)` — модульная инверсия через Fermat's little theorem
 
-```bash
-cargo test
-```
+5. **Обновил все вызовы в Point методах:**
+   - `Point::add()` теперь правильно вызывает все операции с `&U256::P`
+   - `Point::double()` аналогично
+   - Это гарантирует, что арифметика точек происходит всегда по модулю простого поля
 
-All 6 tests pass, including the big one (hashing 1 million 'a' characters):
+---
 
-- ✅ empty string
-- ✅ "abc"
-- ✅ "a"
-- ✅ "hello world"
-- ✅ 448-bit two-block message
-- ✅ 1,000,000 x 'a' (official NIST long-message test)
+### 🟢 **Этап 2: Создание полноценного модуля подписей (`signature.rs`)**
 
-## Files
+#### **Что сделал:**
+
+1. **Генерация приватных ключей:**
+   - `generate_privkey()` — генерирует случайный скаляр через `/dev/urandom` в корректном диапазоне [1, N-1]
+   - `random_scalar()` — хелпер, который циклит до получения валидного числа
+
+2. **Загрузка и валидация ключей:**
+   - `load_privkey_from_hex(hex)` — загружает приватный ключ из hex-строки
+   - Внутри вызывает `is_valid_privkey()` — проверяет, что ключ не равен 0 и < N
+   - Возвращает `Option<U256>` — None если ключ невалиден
+
+3. **ECDSA подпись (canonical low-S):**
+   - `sign(d, z)` — подписывает хеш сообщения `z` приватным ключом `d`
+   - **Критически важно:** реализована canonical низко-S нормализация
+     - Если `s > N/2`, то `s = N - s`
+     - Это предотвращает **signature malleability** — уязвимость, из-за которой современные блокчейны отклоняют транзакции
+   - Алгоритм ECDSA:
+     ```
+     1. k = random_scalar()
+     2. R = k*G  (точка на кривой)
+     3. r = R.x mod N
+     4. if r == 0, повторить
+     5. k_inv = k^-1 mod N (модульная инверсия)
+     6. s = k_inv * (z + r*d) mod N
+     7. if s == 0 or s > N/2, повторить
+     8. return (r, s)
+     ```
+
+4. **ECDSA верификация:**
+   - `verify(sig, z, pubkey)` — проверяет, что подпись действительно от владельца публичного ключа
+   - Алгоритм:
+     ```
+     1. s_inv = s^-1 mod N
+     2. u1 = z * s_inv mod N
+     3. u2 = r * s_inv mod N
+     4. R' = u1*G + u2*Q  (две скалярные операции)
+     5. v = R'.x mod N
+     6. return (v == r)
+     ```
+
+5. **Хеширование сообщений:**
+   - `hash_message(msg)` — SHA-256 хеш сообщения, конвертированный в U256
+   - Используется `Sha256::finalize()` из существующего модуля
+
+---
+
+### 🔵 **Этап 3: Обновление main.rs с полным демо-потоком**
+
+Раньше было просто жёсткий тест. Теперь это реальный workflow:
+
+1. **Загрузка ключа из hex:**
+   ```
+   let hex_key = "18e14a7b6a307f426a94f8114701e7c8e774e7f9a47e2c2035db29a206321725"
+   match Signature::load_privkey_from_hex(hex_key) {
+       Some(key) => { ... }
+       None => println!("Invalid key!")
+   }
+   ```
+   Это демонстрирует **валидацию** — если кто-то попытается загрузить неправильный ключ, он получит None.
+
+2. **Вычисление публичного ключа:**
+   ```
+   let pub_key = Point::G.mul_scalar(&privkey)
+   ```
+   Публичный ключ — это просто приватный ключ, умноженный на генератор G.
+
+3. **Генерация нового случайного ключа:**
+   Показываем, что система может генерировать новые ключи с нуля.
+
+4. **Подпись сообщения:**
+   ```
+   let z = Signature::hash_message(b"Hello, Bitcoin!")
+   let sig = Signature::sign(&privkey, &z)
+   ```
+
+5. **Верификация:**
+   ```
+   let valid = Signature::verify(&sig, &z, &pub_key)
+   ```
+   Если всё правильно, выведет `Valid: true`.
+
+---
+
+## Константы и их значения
+
+| Константа | Назначение |
+|-----------|-----------|
+| `P` | Простое поле для координат точек (secp256k1 поле) |
+| `N` | Порядок циклической группы (количество точек на кривой) |
+| `ONE` | U256(1) |
+| `P_MINUS_2` | Предвычисленное P - 2 для инверсии через Fermat |
+| `N_MINUS_2` | Предвычисленное N - 2 для инверсии через Fermat |
+| `G` | Генератор — исходная точка на кривой |
+| `HALF_N` | N/2 — порог для low-S нормализации |
+
+---
+
+## Почему всё это важно?
+
+### **Signature Malleability**
+Если ты подпишешь сообщение и получишь подпись `(r, s)`, то подпись `(r, N-s)` тоже будет валидной! Это значит, что злоумышленник может создать "другую" подпись для того же сообщения без знания приватного ключа.
+
+**Решение:** мы требуем, чтобы `s <= N/2`. Если алгоритм выдал `s > N/2`, мы заменяем его на `N - s`.
+
+### **Модульная арифметика по полю vs по группе**
+- Точки живут в поле **P** (координаты x, y)
+- Скаляры (приватные ключи, параметр k) живут в группе **N** (порядок группы)
+- Если перепутать — всё сломается
+
+**Решение:** все функции явно принимают `modulus` в параметрах, и мы передаём правильный.
+
+---
+
+## Структура кода
 
 ```
 src/
-  main.rs      — entry point, reads input from terminal
-  sha256.rs    — the actual SHA-256 implementation
-tests/
-  nist_vectors.rs — test cases from the NIST standard
+├── secp256k1.rs    ← Криптография: U256, точки, модульная арифметика
+├── sha256.rs       ← Хеширование сообщений
+├── signature.rs    ← ECDSA: генерация ключей, подпись, верификация
+└── main.rs         ← Демо: полный workflow от генерации до верификации
 ```
 
-## Built with
+---
 
-- Rust
-- Math from FIPS 180-4
-- Lots of debugging :)
+## Как запустить?
+
+```bash
+cargo run -q
+```
+
+Выведет пример подписи с верификацией, всё должно быть `Valid: true`.
+
+---
+
+## Что осталось неиспользуемым?
+
+В коде есть пара вещей, которые оставлены для полноты, но в main не вызываются:
+- `U256::from_hex()` — есть, но вызывается через `load_privkey_from_hex`
+
+Всё остальное активно используется.
+
+---
