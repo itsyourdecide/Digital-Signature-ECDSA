@@ -2,7 +2,7 @@
 
 ## What exactly is this?
 
-This is a complete, from-scratch implementation of Bitcoin-grade cryptography in Rust. It includes SHA-256 hashing, the secp256k1 elliptic curve algebra, and ECDSA signatures with proper canonical normalization (low-S). 
+This is a complete, from-scratch implementation of Bitcoin-grade cryptography in Rust. It includes SHA-256 hashing, the secp256k1 elliptic curve algebra, and ECDSA signatures with proper canonical normalization (low-S), deterministic nonces (RFC 6979), and EVM-compatible public key recovery. 
 
 This is an evolution of my previous secp256k1 and SHA-256 repos, but completely overhauled and mathematically corrected. No external crypto crates—just pure math and code.
 
@@ -47,10 +47,12 @@ I had to **unify the architecture**: making every function flexible enough to ac
    - `generate_privkey()` — Pulls raw entropy directly from the OS (`/dev/urandom`) and generates a random scalar in the strict range `[1, N-1]`.
 2. **Key Loading & Validation:**
    - `load_privkey_from_hex(hex)` — Safely imports a private key from a hex string. It checks if the key is valid (not zero, strictly `< N`) and returns an `Option`.
-3. **ECDSA Signing (Canonical Low-S):**
+3. **ECDSA Signing (RFC 6979 & EVM Ready):**
    - `sign(d, z)` — Signs the message hash `z` using the private key `d`.
+   - **Deterministic Nonce:** The ephemeral key $k$ is no longer left to the mercy of hardware entropy. It is generated deterministically using **RFC 6979** (HMAC-SHA256 DRBG), making lattice attacks mathematically impossible.
+   - **Recovery ID:** The function now outputs `(r, s, v)`, where `v` is the parity of the $Y$ coordinate, allowing public key recovery (`ecrecover`).
    - **Critical feature:** I implemented canonical Low-S normalization (EIP-2 standard).
-     - If `s > N/2`, it forcibly flips it: `s = N - s`.
+     - If `s > N/2`, it forcibly flips it: `s = N - s` (and correspondingly mathematically reflects the `v` parity).
      - This prevents **Signature Malleability** — a vulnerability that causes modern blockchains to immediately reject your transactions.
 4. **ECDSA Verification:**
    - `verify(sig, z, pubkey)` — Mathematically proves the signature belongs to the public key owner. Recalculates the point $R'$ using $u_1 = z \cdot s^{-1} \pmod n$ and $u_2 = r \cdot s^{-1} \pmod n$.
@@ -86,7 +88,7 @@ It used to be a hardcoded test. Now it’s a fully functional pipeline:
 
 ## Why does this architecture matter?
 
-### **1. Signature Malleability**
+### **1. Signature Malleability (EIP-2)**
 If you sign a message and get a valid `(r, s)`, the mathematical mirror `(r, N - s)` is *also* a valid signature! This means an attacker in the mempool could mutate your transaction without knowing your private key.
 **The Fix:** We strictly require `s <= N/2`. If the engine generates an `s` that is too high, we invert it on the spot.
 
@@ -96,6 +98,14 @@ If you sign a message and get a valid `(r, s)`, the mathematical mirror `(r, N -
 - If you mix them up, your crypto engine produces garbage.
 **The Fix:** Every single modular function explicitly demands a `modulus` parameter to prevent cross-contamination.
 
+### **3. The Entropy Trap (RFC 6979)**
+If your random number generator glitches and you reuse the ephemeral key $k$ for two different messages, your private key can be derived with simple algebra. Even a 1-bit statistical bias in $k$ allows attackers to extract your key using Lattice Attacks (Hidden Number Problem).
+**The Fix:** I removed reliance on `/dev/urandom` during signing. The engine now uses the **RFC 6979** standard, acting as a Deterministic Random Bit Generator (DRBG) via HMAC-SHA256. $k$ is now a perfectly uniform derivative of your private key and the message hash.
+
+### **4. EVM Compatibility (Recovery ID 'v')**
+Ethereum and other EVM chains do not include your public key in the transaction payload to save gas. Instead, smart contracts use `ecrecover` to deduce your public key mathematically from the signature itself.
+**The Fix:** The signature engine calculates the `v` parameter, tracking the parity (even/odd) of the $Y$ coordinate of the $R$ point. If the Low-S rule flips the $s$ value, the engine reflects the point across the X-axis by inverting `v`. These signatures are now native to Ethereum.
+
 ---
 
 ## Project Structure
@@ -104,5 +114,5 @@ If you sign a message and get a valid `(r, s)`, the mathematical mirror `(r, N -
 src/
 ├── secp256k1.rs    ← Core Math: U256, Elliptic Curve Points, Modular Arithmetic
 ├── sha256.rs       ← Hashing Engine
-├── signature.rs    ← Cryptography: Keygen, ECDSA Sign/Verify, Entropy handling
+├── signature.rs    ← Cryptography: Keygen, ECDSA Sign/Verify, RFC 6979
 └── main.rs         ← The orchestrator and demo workflow
