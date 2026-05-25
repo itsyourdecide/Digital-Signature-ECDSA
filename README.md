@@ -1,193 +1,129 @@
-# SHA256 + secp256k1 + ECDSA подписи (Rust реализация)
+# SHA256 + secp256k1 + ECDSA Signatures (Rust Implementation)
 
-## Что здесь происходит?
+## What exactly is this?
 
-Это полная реализация криптографии Bitcoin на Rust — SHA-256 хеширование, эллиптическая кривая secp256k1, и ECDSA подписи с правильной канонической нормализацией (low-S).
-Ето продолжение моих прошлих репозиториев secp256k1 и SHA256 но с большими правками
+This is a complete, from-scratch implementation of Bitcoin-grade cryptography in Rust. It includes SHA-256 hashing, the secp256k1 elliptic curve algebra, and ECDSA signatures with proper canonical normalization (low-S), deterministic nonces (RFC 6979), and EVM-compatible public key recovery. 
 
----
-
-## История всех изменений
-
-### 🔴 **Начало: Весь ужас был в сломанной криптографии**
-
-
-#### **1. Неправильная константа порядка группы N**
-В `secp256k1.rs` константа `N` имела неправильное значение — третий limb был `0xFFFFFFFFFFFFFFFF` вместо `0xFFFFFFFFFFFFFFFE`.
-Это звучит как мелкая опечатка, но это означало, что все расчёты модульной арифметики модulo N были на 2^128 больше, чем нужно! 
-**Результат:** подписи никогда не верифицировались, потому что модульная инверсия работала неправильно.
-
-#### **2. Проблема модулей**
-Когда я писал стуктуру U256 в secp256k1 я думал что ключи создаются тоже на поле с модулем P, но к моему разочарованию
-ето не так, оказалось что для подписей и генерации ключей используют модуль N, и пришлось добавлять в каждую функцию универсальность
-для разних модулей
-Нужно было **привести всё к единому стилю**: функции работают с произвольным модулем (P для точек, N для подписей).
+This is an evolution of my previous secp256k1 and SHA-256 repos, but completely overhauled and mathematically corrected. No external crypto crates—just pure math and code.
 
 ---
 
-### 🟡 **Этап 1: Рефакторинг и унификация secp256k1.rs**
+## The Dev Log: How Everything Was Broken (And How I Fixed It)
 
-#### **Что я исправил:**
+### The Beginning: A Cryptographic Nightmare
 
-2. **Добавил метод `is_zero()`** — позволяет проверить, равно ли число нулю (часто нужно при подписании).
+#### **1. The Wrong Group Order (N)**
+In the early days of my `secp256k1.rs`, the constant `N` (the order of the curve) had a slight typo. The third limb was `0xFFFFFFFFFFFFFFFF` instead of `0xFFFFFFFFFFFFFFFE`. 
+Sounds like a minor typo, right? Well, it meant that all modular arithmetic modulo $N$ was off by $2^{128}$! 
+**Result:** Signatures never verified because the modular inversion was fundamentally broken.
 
-3. **Добавил метод `from_bytes()`** — конвертирует массив 32 байт в U256. Нужен для хеширования сообщений.
-
-4. **Унифицировал все модульные операции:**
-   - `add_mod(a, b, modulus)` — теперь принимает модуль и правильно редуцирует результат
-   - `mul_mod(a, b, modulus)` — для P используется быстрое приведение через `reduce()`, для других модулей работает "русское крестьянское умножение" (binary multiplication)
-   - `pow_mod(base, exp, modulus)` — бинарное возведение в степень с произвольным модулем
-   - `invert(a, modulus)` — модульная инверсия через Fermat's little theorem
-
-5. **Обновил все вызовы в Point методах:**
-   - `Point::add()` теперь правильно вызывает все операции с `&U256::P`
-   - `Point::double()` аналогично
-   - Это гарантирует, что арифметика точек происходит всегда по модулю простого поля
+#### **2. The "Two Fields" Problem**
+When I initially wrote the `U256` struct, I assumed that key generation and all curve operations happened in the same finite field modulo `P`. To my disappointment, that’s not how elliptic curve cryptography works. Coordinates live in the base field (modulo `P`), but signatures and scalars live in the scalar field (modulo `N`).
+I had to **unify the architecture**: making every function flexible enough to accept an arbitrary modulus (`P` for points, `N` for signatures).
 
 ---
 
-### 🟢 **Этап 2: Создание полноценного модуля подписей (`signature.rs`)**
+### Phase 1: Core Refactoring & Unification (`secp256k1.rs`)
 
-#### **Что сделал:**
+**What I actually fixed:**
 
-1. **Генерация приватных ключей:**
-   - `generate_privkey()` — генерирует случайный скаляр через `/dev/urandom` в корректном диапазоне [1, N-1]
-   - `random_scalar()` — хелпер, который циклит до получения валидного числа
-
-2. **Загрузка и валидация ключей:**
-   - `load_privkey_from_hex(hex)` — загружает приватный ключ из hex-строки
-   - Внутри вызывает `is_valid_privkey()` — проверяет, что ключ не равен 0 и < N
-   - Возвращает `Option<U256>` — None если ключ невалиден
-
-3. **ECDSA подпись (canonical low-S):**
-   - `sign(d, z)` — подписывает хеш сообщения `z` приватным ключом `d`
-   - **Критически важно:** реализована canonical низко-S нормализация
-     - Если `s > N/2`, то `s = N - s`
-     - Это предотвращает **signature malleability** — уязвимость, из-за которой современные блокчейны отклоняют транзакции
-   - Алгоритм ECDSA:
-     ```
-     1. k = random_scalar()
-     2. R = k*G  (точка на кривой)
-     3. r = R.x mod N
-     4. if r == 0, повторить
-     5. k_inv = k^-1 mod N (модульная инверсия)
-     6. s = k_inv * (z + r*d) mod N
-     7. if s == 0 or s > N/2, повторить
-     8. return (r, s)
-     ```
-
-4. **ECDSA верификация:**
-   - `verify(sig, z, pubkey)` — проверяет, что подпись действительно от владельца публичного ключа
-   - Алгоритм:
-     ```
-     1. s_inv = s^-1 mod N
-     2. u1 = z * s_inv mod N
-     3. u2 = r * s_inv mod N
-     4. R' = u1*G + u2*Q  (две скалярные операции)
-     5. v = R'.x mod N
-     6. return (v == r)
-     ```
-
-5. **Хеширование сообщений:**
-   - `hash_message(msg)` — SHA-256 хеш сообщения, конвертированный в U256
-   - Используется `Sha256::finalize()` из существующего модуля
+1. **Added `is_zero()`** — A fast way to check for zero, which is critical during signature generation.
+2. **Added `from_bytes()`** — Converts a 32-byte array straight into a `U256` struct. Absolutely necessary for hashing messages.
+3. **Unified Modular Arithmetic:**
+   - `add_mod(a, b, modulus)` — Now accepts a modulus and reduces correctly.
+   - `mul_mod(a, b, modulus)` — Smart routing: if the modulus is `P`, it uses fast reduction; for arbitrary moduli (like `N`), it falls back to the reliable "Russian peasant" (binary) multiplication.
+   - `pow_mod(base, exp, modulus)` — Binary exponentiation with an arbitrary modulus.
+   - `invert(a, modulus)` — Modular inversion using Fermat's Little Theorem.
+4. **Upgraded Point Math:**
+   - `Point::add()` and `Point::double()` now strictly enforce the `&U256::P` modulus. Point arithmetic is now permanently safe.
 
 ---
 
-### 🔵 **Этап 3: Обновление main.rs с полным демо-потоком**
+### Phase 2: The Signature Engine (`signature.rs`)
 
-Раньше было просто жёсткий тест. Теперь это реальный workflow:
+**The new mechanics:**
 
-1. **Загрузка ключа из hex:**
-   ```
-   let hex_key = "18e14a7b6a307f426a94f8114701e7c8e774e7f9a47e2c2035db29a206321725"
-   match Signature::load_privkey_from_hex(hex_key) {
-       Some(key) => { ... }
-       None => println!("Invalid key!")
-   }
-   ```
-   Это демонстрирует **валидацию** — если кто-то попытается загрузить неправильный ключ, он получит None.
-
-2. **Вычисление публичного ключа:**
-   ```
-   let pub_key = Point::G.mul_scalar(&privkey)
-   ```
-   Публичный ключ — это просто приватный ключ, умноженный на генератор G.
-
-3. **Генерация нового случайного ключа:**
-   Показываем, что система может генерировать новые ключи с нуля.
-
-4. **Подпись сообщения:**
-   ```
-   let z = Signature::hash_message(b"Hello, Bitcoin!")
-   let sig = Signature::sign(&privkey, &z)
-   ```
-
-5. **Верификация:**
-   ```
-   let valid = Signature::verify(&sig, &z, &pub_key)
-   ```
-   Если всё правильно, выведет `Valid: true`.
+1. **Private Key Generation:**
+   - `generate_privkey()` — Pulls raw entropy directly from the OS (`/dev/urandom`) and generates a random scalar in the strict range `[1, N-1]`.
+2. **Key Loading & Validation:**
+   - `load_privkey_from_hex(hex)` — Safely imports a private key from a hex string. It checks if the key is valid (not zero, strictly `< N`) and returns an `Option`.
+3. **ECDSA Signing (RFC 6979 & EVM Ready):**
+   - `sign(d, z)` — Signs the message hash `z` using the private key `d`.
+   - **Deterministic Nonce:** The ephemeral key $k$ is no longer left to the mercy of hardware entropy. It is generated deterministically using **RFC 6979** (HMAC-SHA256 DRBG), making lattice attacks mathematically impossible.
+   - **Recovery ID:** The function now outputs `(r, s, v)`, where `v` is the parity of the $Y$ coordinate, allowing public key recovery (`ecrecover`).
+   - **Critical feature:** I implemented canonical Low-S normalization (EIP-2 standard).
+     - If `s > N/2`, it forcibly flips it: `s = N - s` (and correspondingly mathematically reflects the `v` parity).
+     - This prevents **Signature Malleability** — a vulnerability that causes modern blockchains to immediately reject your transactions.
+4. **ECDSA Verification:**
+   - `verify(sig, z, pubkey)` — Mathematically proves the signature belongs to the public key owner. Recalculates the point $R'$ using $u_1 = z \cdot s^{-1} \pmod n$ and $u_2 = r \cdot s^{-1} \pmod n$.
+5. **Message Hashing:**
+   - `hash_message(msg)` — Hashes raw bytes via SHA-256 and casts the result to `U256`.
 
 ---
 
-## Константы и их значения
+### Phase 3: The Main Workflow (`main.rs`)
 
-| Константа | Назначение |
-|-----------|-----------|
-| `P` | Простое поле для координат точек (secp256k1 поле) |
-| `N` | Порядок циклической группы (количество точек на кривой) |
-| `ONE` | U256(1) |
-| `P_MINUS_2` | Предвычисленное P - 2 для инверсии через Fermat |
-| `N_MINUS_2` | Предвычисленное N - 2 для инверсии через Fermat |
-| `G` | Генератор — исходная точка на кривой |
-| `HALF_N` | N/2 — порог для low-S нормализации |
+It used to be a hardcoded test. Now it’s a fully functional pipeline:
+
+1. **Loads a key from hex:** Demonstrates validation. If someone tries a bad key, it cleanly returns `None`.
+2. **Derives the Public Key:** Calculates $Q = d \cdot G$.
+3. **Generates a brand new random key** to prove the entropy engine works.
+4. **Signs a message:** `Signature::sign(&privkey, &z)`
+5. **Verifies the payload:** Returns `Valid: true` if the math checks out.
 
 ---
 
-## Почему всё это важно?
+## Constants Cheat Sheet
 
-### **Signature Malleability**
-Если ты подпишешь сообщение и получишь подпись `(r, s)`, то подпись `(r, N-s)` тоже будет валидной! Это значит, что злоумышленник может создать "другую" подпись для того же сообщения без знания приватного ключа.
-
-**Решение:** мы требуем, чтобы `s <= N/2`. Если алгоритм выдал `s > N/2`, мы заменяем его на `N - s`.
-
-### **Модульная арифметика по полю vs по группе**
-- Точки живут в поле **P** (координаты x, y)
-- Скаляры (приватные ключи, параметр k) живут в группе **N** (порядок группы)
-- Если перепутать — всё сломается
-
-**Решение:** все функции явно принимают `modulus` в параметрах, и мы передаём правильный.
+| Constant | Purpose |
+|----------|---------|
+| `P` | The prime base field (used for $x, y$ point coordinates). |
+| `N` | The order of the cyclic group (used for scalars, keys, and signatures). |
+| `ONE` | Just `U256(1)`. |
+| `P_MINUS_2` | Precomputed $P - 2$ for modular inversion (Fermat). |
+| `G` | The Generator Point — the origin of the secp256k1 universe. |
+| `HALF_N` | $N/2$ — The strict threshold for Low-S normalization. |
 
 ---
 
-## Структура кода
+## Why does this architecture matter?
 
-```
+### **1. Signature Malleability (EIP-2)**
+If you sign a message and get a valid `(r, s)`, the mathematical mirror `(r, N - s)` is *also* a valid signature! This means an attacker in the mempool could mutate your transaction without knowing your private key.
+**The Fix:** We strictly require `s <= N/2`. If the engine generates an `s` that is too high, we invert it on the spot.
+
+### **2. The Two Fields Trap (P vs N)**
+- Points on the curve live in field **P**.
+- Scalars (private keys, nonces, signature parts) live in group **N**.
+- If you mix them up, your crypto engine produces garbage.
+**The Fix:** Every single modular function explicitly demands a `modulus` parameter to prevent cross-contamination.
+
+### **3. The Entropy Trap (RFC 6979)**
+If your random number generator glitches and you reuse the ephemeral key $k$ for two different messages, your private key can be derived with simple algebra. Even a 1-bit statistical bias in $k$ allows attackers to extract your key using Lattice Attacks (Hidden Number Problem).
+**The Fix:** I removed reliance on `/dev/urandom` during signing. The engine now uses the **RFC 6979** standard, acting as a Deterministic Random Bit Generator (DRBG) via HMAC-SHA256. $k$ is now a perfectly uniform derivative of your private key and the message hash.
+
+### **4. EVM Compatibility (Recovery ID 'v')**
+Ethereum and other EVM chains do not include your public key in the transaction payload to save gas. Instead, smart contracts use `ecrecover` to deduce your public key mathematically from the signature itself.
+**The Fix:** The signature engine calculates the `v` parameter, tracking the parity (even/odd) of the $Y$ coordinate of the $R$ point. If the Low-S rule flips the $s$ value, the engine reflects the point across the X-axis by inverting `v`. These signatures are now native to Ethereum.
+
+---
+
+## Project Structure
+
+```text
 src/
-├── secp256k1.rs    ← Криптография: U256, точки, модульная арифметика
-├── sha256.rs       ← Хеширование сообщений
-├── signature.rs    ← ECDSA: генерация ключей, подпись, верификация
-└── main.rs         ← Демо: полный workflow от генерации до верификации
+├── secp256k1.rs    ← Core Math: U256, Elliptic Curve Points, Modular Arithmetic
+├── sha256.rs       ← Hashing Engine
+├── signature.rs    ← Cryptography: Keygen, ECDSA Sign/Verify, RFC 6979
+└── main.rs         ← The orchestrator and demo workflow
 ```
 
 ---
 
-## Как запустить?
+## How to run?
 
 ```bash
 cargo run -q
 ```
 
-Выведет пример подписи с верификацией, всё должно быть `Valid: true`.
-
----
-
-## Что осталось неиспользуемым?
-
-В коде есть пара вещей, которые оставлены для полноты, но в main не вызываются:
-- `U256::from_hex()` — есть, но вызывается через `load_privkey_from_hex`
-
-Всё остальное активно используется.
-
----
+You should see a full signing and verification demo ending with `Valid: true`.
