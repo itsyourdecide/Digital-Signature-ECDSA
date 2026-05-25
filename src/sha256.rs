@@ -111,10 +111,10 @@ impl Sha256 {
             *h_i = h_i.wrapping_add(*v_i);
         }
     }
-    
+
     pub fn finalize(mut self, input: &[u8]) -> [u8; 32] {
         let padded = Self::pad(input);
-        
+
         for chunk in padded.chunks(64) {
             self.process_block(chunk);
         }
@@ -126,4 +126,3 @@ impl Sha256 {
         out
     }
 }
-

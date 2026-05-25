@@ -5,3 +5,4 @@ extern crate alloc;
 pub mod secp256k1;
 pub mod sha256;
 pub mod signature;
+pub mod utils;

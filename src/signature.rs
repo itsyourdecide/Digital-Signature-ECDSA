@@ -1,11 +1,11 @@
-use crate::secp256k1::{U256, Point};
+use crate::secp256k1::{Point, U256};
 use crate::sha256::Sha256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signature {
     pub r: U256, // Signature component r
     pub s: U256, // Signature component s
-    pub v: u8, // Recovery ID (0 or 1)
+    pub v: u8,   // Recovery ID (0 or 1)
 }
 
 impl Signature {
@@ -18,24 +18,20 @@ impl Signature {
     ]);
 
     pub fn generate_privkey_from_entropy(entropy: &[u8; 32]) -> Option<U256> {
-    let scalar = U256::from_bytes(entropy);
-    
-    if !scalar.is_zero() && !scalar.is_greater_or_equal(&U256::N) {
-        Some(scalar)
-    } else {
-        None 
+        let scalar = U256::from_bytes(entropy);
+
+        if !scalar.is_zero() && !scalar.is_greater_or_equal(&U256::N) {
+            Some(scalar)
+        } else {
+            None
+        }
     }
-}
 
     /// Load and validate private key from hex string.
     /// Returns Some(privkey) if valid, None if invalid (zero or >= N).
     pub fn load_privkey_from_hex(hex: &str) -> Option<U256> {
         let privkey = U256::from_hex(hex);
-        if privkey.is_valid_privkey() {
-            Some(privkey)
-        } else {
-            None
-        }
+        privkey.is_valid_privkey().then_some(privkey)
     }
 
     /// ECDSA signing
@@ -48,7 +44,9 @@ impl Signature {
             // R = k * G
             let r_point = Point::G.mul_scalar(&k);
             let r = U256::add_mod(&r_point.x, &U256([0; 4]), &U256::N);
-            if r.is_zero() { continue; }
+            if r.is_zero() {
+                continue;
+            }
 
             let mut is_y_odd = r_point.y.0[0] & 1 == 1;
 
@@ -63,10 +61,12 @@ impl Signature {
             // EIP-2: Canonical low-S
             if s.is_greater_or_equal(&Self::HALF_N) && s != Self::HALF_N {
                 s = U256::sup_row(&U256::N, &s);
-                is_y_odd = !is_y_odd; 
+                is_y_odd = !is_y_odd;
             }
 
-            if s.is_zero() { continue; }
+            if s.is_zero() {
+                continue;
+            }
 
             let v = if is_y_odd { 1 } else { 0 };
 

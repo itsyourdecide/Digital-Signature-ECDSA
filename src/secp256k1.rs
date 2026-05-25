@@ -1,5 +1,5 @@
-use alloc::format;
-use alloc::string::String;
+
+use core::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct U256(pub [u64; 4]);
@@ -183,12 +183,15 @@ impl U256 {
             limbs[i] = u64::from_be_bytes(bytes[start..start + 8].try_into().unwrap());
         }
         U256(limbs)
-    }
+    }    
+}
 
-    pub fn to_hex(&self) -> String {
-        format!("{:016x}{:016x}{:016x}{:016x}", self.0[3], self.0[2], self.0[1], self.0[0])
+impl fmt::Display for U256 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:016x}{:016x}{:016x}{:016x}", self.0[3], self.0[2], self.0[1], self.0[0])
     }
 }
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct U512(pub [u64; 8]);

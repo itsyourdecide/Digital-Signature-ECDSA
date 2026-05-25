@@ -8,7 +8,8 @@ fn get_os_entropy() -> [u8; 32] {
 
     let mut buf = [0u8; 32];
     let mut file = File::open("/dev/urandom").expect("OS entropy failed: /dev/urandom not found");
-    file.read_exact(&mut buf).expect("Failed to read from /dev/urandom");
+    file.read_exact(&mut buf)
+        .expect("Failed to read from /dev/urandom");
     buf
 }
 
