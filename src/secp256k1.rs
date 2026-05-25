@@ -183,7 +183,11 @@ impl U256 {
             limbs[i] = u64::from_be_bytes(bytes[start..start + 8].try_into().unwrap());
         }
         U256(limbs)
-    }    
+    }
+
+    pub fn to_hex(&self) -> alloc::string::String {
+        alloc::format!("{self}")
+    }
 }
 
 impl fmt::Display for U256 {
